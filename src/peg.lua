@@ -890,14 +890,13 @@ emit(bodyFunctions, {
 })
 for name, def in pairs(astDefinitions) do
 	if def.public then
-		local signature = string.format("%s %s_from_blob(Blob const* blob)", def.typeName, def.typeName)
+		local signature = string.format("%s %s_from_blob(Blob const* blob, Error* error)", def.typeName, def.typeName)
 		emit(headerFunctions, {
 			{"%s;", signature},
 			{""},
 		})
 
 		--[[
-	Error tokenError = (Error){0};
 	ASTParse* parse = ASTParse_new(blob, &tokenError);
 	if (parse == NULL) {
 		Error_render_colorful(&tokenError, stderr);
@@ -907,18 +906,20 @@ for name, def in pairs(astDefinitions) do
 
 		emit(bodyFunctions, {
 			{"%s {", signature},
-			{"\tError error = (Error){0};"},
-			{"\t%sParse* parse = %sParse_new(blob, &error);", PREFIX, PREFIX},
+			{"\t%sParse* parse = %sParse_new(blob, error);", PREFIX, PREFIX},
 			{"\tif (parse == NULL) {"},
-			{"\t\treturn (%s){NULL, -1};", def.typeName},
+			{"\t\treturn (%s){NULL, -3};", def.typeName},
 			{"\t}"},
-			{"\tint32_t consumed = %s_parse(parse, 0, &error);", def.typeName},
-			{"\tif (consumed < 0) {"},
-			{"\t\treturn (%s){NULL, -1};", def.typeName},
+			{"\tint32_t consumed = %s_parse(parse, 0, error);", def.typeName},
+			{"\tif (Error_has_problem(error)) {"},
+			{"\t\treturn (%s){NULL, -2};", def.typeName},
 			{"\t}"},
 			{"\tif (consumed < parse->token_count) {"},
-			{"\t\tError_text(&error, \"There is unexpected content\");"},
-			{"\t\tError_at_location(&error, (Location){blob, parse->token_offsets[consumed], parse->token_offsets[consumed] + parse->token_lengths[consumed]});"},
+			{"\t\tif (consumed < 0) {"},
+			{"\t\t\tconsumed = 0;"},
+			{"\t\t}"},
+			{"\t\tError_text(error, \"There is unexpected content\");"},
+			{"\t\tError_at_location(error, (Location){blob, parse->token_offsets[consumed], parse->token_offsets[consumed] + parse->token_lengths[consumed]});"},
 			{"\t\treturn (%s){NULL, -1};", def.typeName},
 			{"\t}"},
 			{"\treturn (%s){.parse=parse, .index=parse->size};", def.typeName},
@@ -1020,6 +1021,7 @@ outCFile:write((([==[
 static $Parse* $Parse_new(Blob const* blob, Error* error) {
 	$Parse* parse = malloc(sizeof($Parse));
 	if (parse == NULL) {
+		Error_text(error, "Memory allocation failed while parsing.");
 		return NULL;
 	}
 	parse->blob = blob;
@@ -1041,6 +1043,7 @@ static $Parse* $Parse_new(Blob const* blob, Error* error) {
 			free(offsets);
 			free(lengths);
 			free(parse);
+			Error_text(error, "Memory allocation failed while parsing.");
 			return NULL;
 		}
 

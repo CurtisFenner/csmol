@@ -36,6 +36,7 @@ Location Location_span(Location begin, Location end);
 
 #define ERROR_MAX_FIELDS 32
 
+// Create an empty Error by `(Error){0}`.
 typedef struct {
 	int8_t count;
 	Location locations[ERROR_MAX_FIELDS];
@@ -66,6 +67,6 @@ void Error_render_colorful(Error* error, FILE* file);
 
 // RETURNS 0 when the error has not been written to.
 // Otherwise returns a positive integer.
-inline int Error_has_problem(Error const* error) { return error->count; }
+int Error_has_problem(Error const* error);
 
 #endif

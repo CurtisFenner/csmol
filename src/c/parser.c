@@ -263,3 +263,5 @@ void Error_render_colorful(Error* error, FILE* file) {
 	}
 	fflush(file);
 }
+
+int Error_has_problem(Error const* error) { return error->count; }
