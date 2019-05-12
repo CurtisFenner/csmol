@@ -15,96 +15,11 @@ setmetatable(_G, {
 	end,
 })
 
---------------------------------------------------------------------------------
-
-local specialRepresentation = {
-	["\a"] = [[\a]],
-	["\b"] = [[\b]],
-	["\f"] = [[\f]],
-	["\n"] = [[\n]],
-	["\r"] = [[\r]],
-	["\t"] = [[\t]],
-	["\v"] = [[\v]],
-	["\\"] = [[\\]],
-	["\""] = [[\"]],
-	["\0"] = [[\0]],
-}
-for i = 0, 31 do
-	local c = string.char(i)
-	if not specialRepresentation[c] then
-		local digit = tostring(i)
-		specialRepresentation[c] = string.format("\\%03d", i)
-	end
+local function fail(message)
+	io.stderr:write(message .. "\n")
+	io.stderr:flush()
+	os.exit(1)
 end
-for i = 128, 255 do
-	specialRepresentation[string.char(i)] = "\\" .. tostring(i)
-end
-
--- RETURNS nothing
--- MODIFIES out by appending strings to it
-local function showAdd(object, indent, out)
-	if indent > 12 then
-		table.insert(out, "...")
-	elseif type(object) == "string" then
-		-- Turn into a string literal
-		table.insert(out, [["]])
-		for character in object:gmatch "." do
-			table.insert(out, specialRepresentation[character] or character)
-		end
-		table.insert(out, [["]])
-	elseif type(object) == "table" then
-		local internal = {}
-		table.insert(out, "{")
-		for key, value in pairs(object) do
-			local line = {}
-			table.insert(line, "\n" .. string.rep("\t", indent) .. "\t[")
-			showAdd(key, indent + 1, line)
-			table.insert(line, "] = ")
-			if rawequal(key, "location") and type(value) == "table" then
-				if value.file and value.from and value.to then
-					table.insert(line, ("<%s:%d:%d-%d:%d>"):format(
-						value.file.filename,
-						value.from.line,
-						value.from.column,
-						value.to.line,
-						value.to.column
-					))
-				else
-					showAdd(value, indent + 1, line)
-				end
-			else
-				showAdd(value, indent + 1, line)
-			end
-			table.insert(line, ",")
-			table.insert(internal, table.concat(line))
-		end
-		table.sort(internal)
-		for i = 1, #internal do
-			if #internal > 1000 and i > 3 and i <= #internal - 3 then
-				local el = "\n" .. string.rep("\t", indent) .. "...;"
-				if out[#out] ~= el then
-					table.insert(out, el)
-				end
-			else
-				local line = internal[i]
-				table.insert(out, line)
-			end
-		end
-		table.insert(out, "\n" .. string.rep("\t", indent) .. "}")
-	else
-		table.insert(out, tostring(object))
-	end
-end
-
--- RETURNS a nearly-valid Lua expression literal representing the
--- (acyclic) Lua value
-local function show(value)
-	local out = {}
-	showAdd(value, 0, out)
-	return table.concat(out)
-end
-
---------------------------------------------------------------------------------
 
 local PREFIX = "AST"
 
@@ -265,7 +180,7 @@ local function parseRegex(regex)
 					assert(type(class[#class]) == "number", "unexpected `-`")
 					class[#class] = {class[#class]}
 				else
-					assert(e.escaped or e.regular, show(e))
+					assert(e.escaped or e.regular)
 					local byte = e.escaped or e.regular:byte()
 					assert(type(byte) == "number")
 					if type(class[#class]) == "table" and #class[#class] == 1 then
@@ -463,6 +378,10 @@ local function compileChoice(choice)
 		{"\tint32_t consumed;"},
 	})
 	for i, field in ipairs(choice.fields) do
+		if field.cut then
+			fail("Cuts like " .. field.location .. " aren't allowed on choices.")
+		end
+
 		emit(bodyFunctions, {
 			{"\tconsumed = %s_parse(parse, from, error);", field.typeName},
 			{"\tif (consumed >= 0) {"},
@@ -518,7 +437,6 @@ local function compileSequence(sequence)
 			-- a contiguous array.
 			-- [# # #][a:-1][# # #][b:&a][# # #][c:&b][&c][&b][arrayi:&a]
 			local maxCond = field.modifier.mark == "?" and string.format("count%d < 1", i) or "1"
-			local minCond = field.modifier.mark == "+" and string.format("count%d < 1", i) or "0"
 			emit(bodyFunctions, {
 				{"\tint32_t count%d = 0;", i},
 				{"\tint32_t linked%d = -1;", i},
@@ -531,9 +449,26 @@ local function compileSequence(sequence)
 				{"\t\tcount%d++;", i},
 				{"\t\tconsumed += c;"},
 				{"\t}"},
-				{"\tif (%s) {", minCond},
-				{"\t\tgoto fail;"},
-				{"\t}"},
+			})
+			if field.modifier.mark == "+" then
+				emit(bodyFunctions, {
+					{"\tif (count%d == 0) {", i},
+				})
+				if field.cut then
+					emit(bodyFunctions, {
+						{"\t\tError_text(error, \"%s\");", field.cut},
+						{"\t\tError_at_location(error, head_location(parse, from + consumed));"},
+					})
+				end
+				emit(bodyFunctions, {
+					{"\t\tgoto fail;"},
+					{"\t}"},
+				})
+			elseif field.cut then
+				fail("The modifier `" .. field.modifier.mark .. "` cannot fail at " .. field.location .. ".")
+			end
+
+			emit(bodyFunctions, {
 				{"\tfor (int32_t k = 0; k < count%d; k++) {", i},
 				{"\t\t%sParse_push(parse, linked%d);", PREFIX, i},
 				{"\t\tlinked%d = parse->data[linked%d];", i, i},
@@ -544,7 +479,18 @@ local function compileSequence(sequence)
 		else
 			emit(bodyFunctions, {
 				{"\tint32_t consumed%d = %s_parse(parse, from + consumed, error);", i, field.typeName, i},
+			})
+			emit(bodyFunctions, {
 				{"\tif (consumed%d < 0) {", i},
+			})
+			if field.cut then
+				emit(bodyFunctions, {
+					{"\t\tError_text(error, \"%s\");", field.cut},
+					{"\t\tError_at_location(error, head_location(parse, from + consumed));"},
+				})
+			end
+
+			emit(bodyFunctions, {
 				{"\t\tgoto fail;"},
 				{"\t}"},
 				{"\tint32_t result%d = %sParse_ptr(parse);", i, PREFIX},
@@ -670,9 +616,7 @@ for _, line in ipairs(lines) do
 		})
 
 		if regexDefinitions[name] then
-			io.stderr:write(string.format("Token `%s` already defined at %s redefined at %s.\n", name, regexDefinitions[name].location, location))
-			io.stderr:flush()
-			os.exit(1)
+			fail(string.format("Token `%s` already defined at %s redefined at %s.", name, regexDefinitions[name].location, location))
 		end
 
 		regexDefinitions[name] = {
@@ -685,9 +629,7 @@ for _, line in ipairs(lines) do
 		-- Defining an AST type, either as a struct or a union.
 		owner = astDef[2]
 		if astDefinitions[owner] then
-			io.stderr:write(string.format("AST `%s` already defined at %s redefined at %s.\n", owner, astDefinitions[owner].location, location))
-			io.stderr:flush()
-			os.exit(1)
+			fail(string.format("AST `%s` already defined at %s redefined at %s.", owner, astDefinitions[owner].location, location))
 		end
 
 		astDefinitions[owner] = {
@@ -699,18 +641,14 @@ for _, line in ipairs(lines) do
 		}
 	elseif continuation[1] then
 		if not owner then
-			io.stderr:write("Expected a new definition at " .. location .. ".\n")
-			io.stderr:flush()
-			os.exit(1)
+			fail("Expected a new definition at " .. location .. ".")
 		end
 
 		local mode = continuation[1] == "" and "seq" or "choice"
 		if not astDefinitions[owner].mode then
 			astDefinitions[owner].mode = mode
 		elseif astDefinitions[owner].mode ~= mode then
-			io.stderr:write("Inconsistent AST mode at " .. locaiton .. ".\n")
-			io.stderr:flush()
-			os.exit(1)
+			fail("Inconsistent AST mode at " .. location .. ".")
 		end
 
 		local name = continuation[2]
@@ -720,9 +658,7 @@ for _, line in ipairs(lines) do
 			location = location,
 		})
 	else
-		io.stderr:write("Bad syntax at " .. location .. ": `" .. text .. "`\n")
-		io.stderr:flush()
-		os.exit(1)
+		fail("Bad syntax at " .. location .. ": `" .. text .. "`.")
 	end
 end
 
@@ -757,13 +693,21 @@ for name, def in pairs(astDefinitions) do
 		end
 		fieldMap[field.name] = field.location
 
+		local def = field.def
+		local cut = def:find("%s+!%s+\".*\"$") or false
+		if cut then
+			local defEnd = cut - 1
+			cut = def:sub(cut):match "^%s+!%s+\"(.+)\"$"
+			def = def:sub(1, defEnd)
+		end
+
 		local body = false
 		local modifier = false
-		if field.def:sub(-1):match "[*+?]" then
+		if def:sub(-1):match "[*+?]" then
 			-- A repetition modifier.
-			if field.def:sub(-2, -2) == "~" and field.def:sub(-1):match "[+*]" then
+			if def:sub(-2, -2) == "~" and def:sub(-1):match "[+*]" then
 				-- A "comma" modifier that separates repetitions.
-				local sepBegin = field.def:find "(\".*\")~[+*]$"
+				local sepBegin = def:find "(\".*\")~[+*]$"
 				if not sepBegin then
 					io.stderr:write("Bad separated repetition syntax at " .. field.location .. ".\n")
 					io.stderr:flush()
@@ -771,21 +715,21 @@ for name, def in pairs(astDefinitions) do
 				end
 
 				modifier = {
-					mark = field.def:sub(-1),
-					separator = getKeywordParser(field.def:sub(sepBegin, -3)),
+					mark = def:sub(-1),
+					separator = getKeywordParser(def:sub(sepBegin, -3)),
 				}
-				body = field.def:sub(1, sepBegin - 1)
+				body = def:sub(1, sepBegin - 1)
 			else
 				modifier = {
-					mark = field.def:sub(-1),
+					mark = def:sub(-1),
 					separator = false,
 				}
-				body = field.def:sub(1, -2)
+				body = def:sub(1, -2)
 			end
 		else
-			body = field.def
+			body = def
 		end
-		
+
 		if body:sub(1, 1) == "\"" then
 			-- Keyword token.
 			assert(body:match "^\"[^\"]+\"$")
@@ -796,11 +740,12 @@ for name, def in pairs(astDefinitions) do
 				typeName = PREFIX .. "_" .. getKeywordParser(body),
 				modifier = modifier,
 				enum = getKeywordParser(body),
+				cut = cut,
 			})
 		else
 			-- Token or AST.
 			if not body:match "^[a-zA-Z][_a-zA-Z0-9]*$" then
-				io.stderr:write("Bad syntax at " .. field.location .. ".\n")
+				io.stderr:write("Bad element syntax `" .. body .. "` at " .. field.location .. ".\n")
 				io.stderr:flush()
 				os.exit(1)
 			end
@@ -814,11 +759,11 @@ for name, def in pairs(astDefinitions) do
 				end
 
 				table.insert(fields, {
+					type = "ast",
 					name = field.name,
 					typeName = PREFIX .. body,
-					type = "ast",
 					modifier = modifier,
-					f = PREFIX .. body .. "_parse",
+					cut = cut,
 				})
 			else
 				-- Token.
@@ -830,11 +775,12 @@ for name, def in pairs(astDefinitions) do
 
 				local enum = "T_" .. body:upper()
 				table.insert(fields, {
+					type = "token",
 					name = field.name,
 					typeName = PREFIX .. "_" .. enum,
-					type = "token",
 					modifier = modifier,
-					enum = enum
+					enum = enum,
+					cut = cut,
 				})
 			end
 		end
@@ -969,6 +915,12 @@ for _, tag in ipairs(tokenTags) do
 end
 outCFile:write("} TokenTag;\n\n")
 outCFile:write((([==[
+
+static inline Location head_location($Parse* parse, int32_t offset) {
+	int32_t t = offset < parse->token_count ? offset : parse->token_count - 1;
+	return (Location){parse->blob, parse->token_offsets[t], parse->token_offsets[t] + parse->token_lengths[t]};
+}
+
 static int32_t $Parse_ptr($Parse* parse) {
 	return parse -> size;
 }
