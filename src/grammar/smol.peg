@@ -1,0 +1,319 @@
+# Tokens
+	iden := /[a-z][a-zA-Z0-9]*/
+	type_iden := /[A-Z][a-zA-Z0-9]*/
+	typeparam_iden := /#[A-Z][a-zA-Z0-9]*/
+	-whitespace := /[ \t\n\r]/
+	-comment := /\/\/[^\n]*/
+	string_literal := /"(\\[tn\\"]|[^"\\])*"/
+	int_literal := /[0-9][0-9]*/
+	operator := /[+*\/<>=%^\-]+/
+	punctuation := /[.,:;!?|()\[\]{}]/
+
+# ASTs
+	$Source :=
+		package: PackageDef ! "A Smol source must begin with a package declaration"
+		imports: Import*
+		definitions: Definition+ ! "A Smol source must have at least one definition"
+
+	PackageDef :=
+		_: "package"
+		package_name: iden
+		_: ";"
+	
+	Import :=
+		_: "import"
+		imported: ImportChoice ! "Expected a package or object to import"
+		_: ";" ! "Expected a `;` to finish an `import`"
+
+	ImportChoice :=
+		|of_object: ImportOfObject
+		|of_package: ImportOfPackage
+
+	ImportOfPackage :=
+		package_name: iden
+	
+	ImportOfObject :=
+		package_name: iden
+		_: ":"
+		object_name: type_iden
+	
+	Definition :=
+		|class_def: ClassDefinition
+		|union_def: UnionDefinition
+		|interface_def: InterfaceDefinition
+	
+	ClassDefinition :=
+		foreign_ann: "foreign"?
+		_: "class"
+		class_name: type_iden ! "Expected a class name after `class`"
+		generics: Generics?
+		implements: Implements?
+		_: "{" ! "Expected a `{` to begin a class's body"
+		fields: Field*
+		members: FunctionDef*
+		_: "}" ! "Expected another class member or a `}` to close a class's body"
+	
+	UnionDefinition :=
+		_: "union"
+		union_name: type_iden ! "Expected a union name after `union`"
+		generics: Generics?
+		implements: Implements?
+		_: "{" ! "Expected a `{` to begin a union's body"
+		fields: Field*
+		members: FunctionDef*
+		_: "}" ! "Expected another class member or a `}` to close a union's body"
+
+	Implements :=
+		_: "implements"
+		constraints: Type","~+
+
+	Field :=
+		_: "var"
+		field: Variable
+		_: ";"
+
+	InterfaceDefinition :=
+		_: "interface"
+		interface_name: type_iden ! "Expected an interface's name after `interface`"
+		generics: Generics?
+		_: "{" ! "Expected a `{` to begin an interface's body"
+		members: InterfaceMember*
+		_: "}" ! "Expected another interface member or a `}` to close an interface's body"
+
+	InterfaceMember :=
+		signature: Signature
+		_: ";" ! "Expected a `;` after the interface member"
+
+	Generics :=
+		_: "["
+		_: typeparam_iden","~+ ! "Expected a type variable after `[`"
+		constraints: GenericConstraints?
+		_: "]" ! "Expected a `]` to finish the type-variables definition"
+
+	GenericConstraints :=
+		_: "|"
+		constraints: GenericConstraint","~+ ! "Expected a type-constraint after `|`"
+	
+	GenericConstraint :=
+		parameter: typeparam_iden
+		_: "is" ! "Expected `is` to make a type-constraint"
+		constraint: Type ! "Expected a constraint type after `is`"
+
+	Type :=
+		|boolean_keyword: "Boolean"
+		|int_keyword: "Int"
+		|never_keyword: "Never"
+		|string_keyword: "String"
+		|unit_keyword: "Unit"
+		|self_keyword: "#Self"
+		|generic_type: typeparam_iden
+		|concrete_type: ConcreteType
+	
+	ConcreteType :=
+		package: PackageQualifier?
+		object_name: type_iden
+		arguments: TypeArguments?
+
+	PackageQualifier :=
+		package: iden
+		_: ":"
+
+	TypeArguments :=
+		_: "["
+		arguments: Type","~+ ! "Expected a type-parameter after `[`"
+		_: "]" ! "Expected a `]` to finish the type-parameter list"
+
+	Signature :=
+		foreign: "foreign"?
+		modifier: FunctionModifier
+		name: iden ! "Expected a function name after `static`/`method`"
+		bang: "!"?
+		_: "(" ! "Expected a `(` to begin the function's arguments"
+		parameters: Variable","~*
+		_: ")" ! "Expected a `)` to close the function's arguments"
+		return_types: Type","~+ ! "Expected a return type after `)`"
+		requires: Requires*
+		ensures: Ensures*
+
+	FunctionModifier :=
+		|method: "method"
+		|static: "static"
+	
+	Requires :=
+		_: "requires"
+		condition: Condition ! "Expected a condition after `requires`"
+	
+	Ensures :=
+		_: "ensures"
+		condition: Condition ! "Expected a condition after `ensures`"
+
+	Condition :=
+		condition: Expression
+		when: ConditionWhen?
+
+	ConditionWhen :=
+		_: "when"
+		whens: Expression","~+ ! "Expected one or more boolean expressions after `when`"
+
+	Variable :=
+		name: iden
+		type: Type
+
+	FunctionDef :=
+		signature: Signature
+		body: Block ! "Expected a function body after a signature"
+	
+	Block :=
+		_: "{"
+		statements: Statement*
+		_: "}" ! "Expected a `}` to finish a block"
+	
+	Statement :=
+		|var_st: VarSt
+		|do_st: DoSt
+		|if_st: IfSt
+		|match_st: MatchSt
+		|assert_st: AssertSt
+		|return_st: ReturnSt
+		|assign_st: AssignSt
+
+	VarSt :=
+		_: "var"
+		variable: Variable","~+ ! "Expected one or more variables after `var`"
+		_: "=" ! "Expected an `=` after variables"
+		expression: Expression","~+ ! "Expected an expression after `=`"
+		_: ";" ! "Expected an `=` to finish a var-statement"
+
+	DoSt :=
+		_: "do"
+		expression: Expression ! "Expected an expression after `do`"
+		_: ";" ! "Expected an `=` to finish a do-statement"
+
+	IfSt :=
+		_: "if"
+		condition: Expression ! "Expected a boolean expression after `if`"
+		body: Block ! "Expected a then-body after an if-condition"
+		elseif_clauses: ElseifClause*
+		else_clause: ElseClause?
+
+	ElseifClause :=
+		_: "elseif"
+		condtion: Expression ! "Expected a boolean expression after `elseif`"
+		body: Block ! "Expected an elseif-body after an elseif-condition"
+
+	ElseClause :=
+		_: "else"
+		body: Block ! "Expected a body after `else`"
+
+	MatchSt :=
+		_: "match"
+		target: Expression ! "Expected a target expression after `match`"
+		_: "{" ! "Expected `{` to begin a match block"
+		cases: CaseClause+ ! "Expected one or more match case clauses"
+		_: "}" ! "Expected `}` to finish a match block"
+	
+	CaseClause :=
+		_: "case"
+		var: iden ! "Expected a case variable"
+		_: "is" ! "Expected `is` after a case variable"
+		tag: iden ! "Expected a tag name after `is`"
+		body: Block ! "Expected a case-body after a case tag"
+
+	AssertSt :=
+		_: "assert"
+		condition: Condition ! "Expected a condition after `assert`"
+		_: ";" ! "Expected a `;` to finish an assert-statement"
+
+	ReturnSt :=
+		_: "return"
+		expressions: Expression","~*
+		_: ";" ! "Expected a `;` to finish a return-statement"
+
+	AssignSt :=
+		variables: iden","~+
+		_: "="
+		expressions: Expression","~+ ! "Expected one or more expressions after an `=`"
+		_: ";" ! "Expected a `;` to finish an assignment statement"
+
+	Expression :=
+		|chain_expr: ChainExpr
+		|forall_expr: ForallExpr
+
+	ChainExpr :=
+		base: ExpressionBase
+		accesses: ExprAccess*
+		op: ExprOp?
+		isa: IsaOp?
+
+	ExprOp :=
+		operator: operator
+		rhs: ExpressionBase ! "Expected an expression after an operator"
+
+	IsaOp :=
+		_: "isa"
+		tag: iden ! "Expected a union tag after `isa`"
+
+	ForallExpr :=
+		_: "forall"
+		_: "(" ! "Expected `(` after `forall`"
+		variable: Variable ! "Expected a variable in a `forall` quantifier"
+		_: ")" ! "Expected a `)` after the forall variable"
+		quantified: Expression ! "Expected an expression to quantify"
+		conditions: ForallIf?
+
+	ForallIf :=
+		_: "if"
+		conditions: Expression","~+ ! "Expected an expression after `if`"
+
+	ExprAccess :=
+		|method: MethodAccess
+		|field: FieldAccess
+	
+	MethodAccess :=
+		_: "."
+		iden: iden
+		bang: "!"?
+		_: "("
+		arguments: Expression","~*
+		_: ")" ! "Expected a `)` to finish a method call"
+
+	FieldAccess :=
+		_: "."
+		field_name: iden ! "Expected a field identifier after `.`"
+
+	ExpressionBase :=
+		|parenthesized: ParenthesizedExpression
+		|variable: iden
+		|this_literal: "this"
+		|true_literal: "true"
+		|false_literal: "false"
+		|int_literal: int_literal
+		|string_literal: string_literal
+		|return_literal: "return"
+		|static_expr: StaticCallExpr
+		|new_expr: NewExpr
+
+	ParenthesizedExpression :=
+		_: "("
+		expression: Expression ! "Expected an expression after `(`"
+		_: ")" ! "Expected a `)` to finish a parenthesized expression"
+
+	StaticCallExpr :=
+		type: Type
+		_: "."
+		function_name: iden ! "Expected a static name after `.`"
+		bang: "!"?
+		_: "(" ! "Expected a `(` to begin an arguments list"
+		arguments: Expression","~*
+		_: ")" ! "Expected a `)` to finish a static call"
+
+	NewExpr :=
+		_: "new"
+		_: "(" ! "Expected a `(` after `new`"
+		arguments: NamedArgument","~*
+		_: ")" ! "Expected a `)` to finish a new expression"
+
+	NamedArgument :=
+		name: iden
+		_: "=" ! "Expected an `=` after an argument name"
+		value: Expression ! "Expected a value after `=`"
