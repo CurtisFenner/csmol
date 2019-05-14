@@ -15,6 +15,44 @@ setmetatable(_G, {
 	end,
 })
 
+--------------------------------------------------------------------------------
+
+local Source = {}
+
+function Source.new()
+	return setmetatable({_elements = {}}, {__index = Source})
+end
+
+function Source:emit(lines)
+	assert(type(lines) == "table" and #lines ~= 0)
+
+	for _, line in ipairs(lines) do
+		local success, result = pcall(string.format, table.unpack(line))
+		assert(success, line[1])
+		table.insert(self._elements, result)
+	end
+end
+
+function Source:section()
+	local child = Source.new()
+	table.insert(self._elements, child)
+	return child
+end
+
+function Source:dump(file)
+	for _, element in ipairs(self._elements) do
+		if type(element) == "string" then
+			file:write(element)
+			file:write("\n")
+		else
+			element:dump(file)
+		end
+	end
+	file:flush()
+end
+
+--------------------------------------------------------------------------------
+
 local function fail(message)
 	io.stderr:write(message .. "\n")
 	io.stderr:flush()
@@ -54,21 +92,16 @@ end
 
 --------------------------------------------------------------------------------
 
-local function emit(list, ss)
-	for _, line in ipairs(ss) do
-		assert(type(line[1]) == "string")
-		local status, result = pcall(string.format, table.unpack(line))
-		if not status then
-			error(result .. ": `" .. line[1] .. "`")
-		end
-		table.insert(list, result)
-	end
-end
+local hSource = Source.new()
+local cSource = Source.new()
 
-local headerTypes = {}
-local headerFunctions = {}
-local bodyTypes = {}
-local bodyFunctions = {}
+local hSourceTop = hSource:section()
+local hSourceHigh = hSource:section()
+local hSourceLow = hSource:section()
+
+local cSourceTop = cSource:section()
+local cSourceHigh = cSource:section()
+local cSourceLow = cSource:section()
 
 --------------------------------------------------------------------------------
 
@@ -209,12 +242,8 @@ local function compileRegex(targetName, regex)
 	assert(type(regex) == "string")
 
 	local tree = parseRegex(regex)
-	local signature = string.format("static int32_t regex_%s(Blob const* blob, int32_t offset)", targetName)
-	table.insert(bodyTypes, signature .. ";")
-	table.insert(bodyTypes, "")
-
 	local helperIndex = 0
-	local helpers = {}
+	local helperSection = cSourceHigh:section()
 
 	-- Writes one or more functions to the `helper` table.
 	-- RETURNS the name of the root helper function for this tree.
@@ -232,25 +261,33 @@ local function compileRegex(targetName, regex)
 
 			if #subs == 1 then
 				-- Shortcut.
-				table.insert(helpers, opening)
-				table.insert(helpers, string.format("\treturn %s(blob, offset);", subs[1]))
-				table.insert(helpers, "}")
-				table.insert(helpers, "")
+				helperSection:emit {
+					{opening},
+					{"\treturn %s(blob, offset);", subs[1]},
+					{"}"},
+					{""},
+				}
 				return name
 			end
 
 			-- Parse the first one that matches (zero or more bytes).
-			table.insert(helpers, opening)
-			table.insert(helpers, "\tint32_t component;")
+			helperSection:emit {
+				{opening},
+				{"\tint32_t component;"},
+			}
 			for _, sub in ipairs(subs) do
-				table.insert(helpers, string.format("\tcomponent = %s(blob, offset);", sub))
-				table.insert(helpers, "\tif (0 <= component) {")
-				table.insert(helpers, "\t\treturn component;")
-				table.insert(helpers, "\t}")
+				helperSection:emit {
+					{"\tcomponent = %s(blob, offset);", sub},
+					{"\tif (0 <= component) {"},
+					{"\t\treturn component;"},
+					{"\t}"},
+				}
 			end
-			table.insert(helpers, "\treturn -1;")
-			table.insert(helpers, "}")
-			table.insert(helpers, "")
+			helperSection:emit {
+				{"\treturn -1;"},
+				{"}"},
+				{""},
+			}
 
 			return name
 		elseif #tree ~= 0 then
@@ -261,74 +298,93 @@ local function compileRegex(targetName, regex)
 
 			if #subs == 1 then
 				-- Shortcut.
-				table.insert(helpers, opening)
-				table.insert(helpers, string.format("\treturn %s(blob, offset);", subs[1]))
-				table.insert(helpers, "}")
-				table.insert(helpers, "")
+				helperSection:emit {
+					{opening},
+					{"\treturn %s(blob, offset);", subs[1]},
+					{"}"},
+					{""},
+				}
 				return name
 			end
 
 			-- Parse a sequence.
-			table.insert(helpers, opening)
-			table.insert(helpers, "\tint32_t consumed = 0;")
-			table.insert(helpers, "\tint32_t component;")
+			helperSection:emit {
+				{opening},
+				{"\tint32_t consumed = 0;"},
+				{"\tint32_t component;"},
+			}
 			for _, sub in ipairs(subs) do
-				table.insert(helpers, string.format("\tcomponent = %s(blob, offset + consumed);", sub))
-				table.insert(helpers, "\tif (component < 0) {")
-				table.insert(helpers, "\t\treturn -1;")
-				table.insert(helpers, "\t}")
-				table.insert(helpers, "\tconsumed += component;")
+				helperSection:emit {
+					{"\tcomponent = %s(blob, offset + consumed);", sub},
+					{"\tif (component < 0) {"},
+					{"\t\treturn -1;"},
+					{"\t}"},
+					{"\tconsumed += component;"},
+				}
 			end
-			table.insert(helpers, "\treturn consumed;")
-			table.insert(helpers, "}")
-			table.insert(helpers, "")
+			helperSection:emit {
+				{"\treturn consumed;"},
+				{"}"},
+				{""},
+			}
 			
 			return name
 		elseif tree.class then
 			assert(type(tree.class.inverted) == "boolean")
 			assert(#tree.class ~= 0)
 
-			table.insert(helpers, opening)
-			table.insert(helpers, "\tif (blob->size <= offset) {")
-			table.insert(helpers, "\t\treturn -1;")
-			table.insert(helpers, "\t}")
+			helperSection:emit {
+				{opening},
+				{"\tif (blob->size <= offset) {"},
+				{"\t\treturn -1;"},
+				{"\t}"},
+			}
 
 			-- Parse a character class.
 			local matching = tree.class.inverted and -1 or 1
-			table.insert(helpers, "\t// matching " .. tostring(tree.class.inverted))
-			table.insert(helpers, "\tint c = blob->data[offset];")
+			helperSection:emit {
+				{"\tint c = blob->data[offset];"},
+			}
 			for i, range in ipairs(tree.class) do
 				local lead = i == 1 and "if" or "} else if"
 				if type(range) == "number" then
-					table.insert(helpers, string.format("\t%s (c == %d) {", lead, range))
-					table.insert(helpers, string.format("\t\treturn %d;", matching))
+					helperSection:emit {
+						{"\t%s (c == %d) {", lead, range},
+						{"\t\treturn %d;", matching},
+					}
 				else
 					assert(#range == 2)
-					table.insert(helpers, string.format("\t%s (%d <= c && c <= %d) {", lead, range[1], range[2]))
-					table.insert(helpers, string.format("\t\treturn %d;", matching))
+					helperSection:emit {
+						{"\t%s (%d <= c && c <= %d) {", lead, range[1], range[2]},
+						{"\t\treturn %d;", matching},
+					}
 				end
 			end
-			table.insert(helpers, "\t}")
-			table.insert(helpers, string.format("\treturn %d;", -matching))
-			table.insert(helpers, "}")
-			table.insert(helpers, "")
+			helperSection:emit {
+				{"\t}"},
+				{"\treturn %d;", -matching},
+				{"}"},
+				{""},
+			}
 
 			return name
 		elseif tree.modifier then
 			assert(tree.modifier == "*", "TODO: handle other modifiers")
 
 			local sub = compileTree(tree.element)
-			table.insert(helpers, opening)
-			table.insert(helpers, "\tint32_t consumed = 0;")
-			table.insert(helpers, "\twhile (1) {")
-			table.insert(helpers, string.format("\t\tint32_t component = %s(blob, offset + consumed);", sub))
-			table.insert(helpers, "\t\tif (component <= 0) {")
-			table.insert(helpers, "\t\t\treturn consumed;")
-			table.insert(helpers, "\t\t}")
-			table.insert(helpers, "\t\tconsumed += component;")
-			table.insert(helpers, "\t}")
-			table.insert(helpers, "}")
-			table.insert(helpers, "")
+			helperSection:emit {
+				{opening},
+				{"\tint32_t consumed = 0;"},
+				{"\twhile (1) {"},
+				{"\t\tint32_t component = %s(blob, offset + consumed);", sub},
+				{"\t\tif (component <= 0) {"},
+				{"\t\t\treturn consumed;"},
+				{"\t\t}"},
+				{"\t\tconsumed += component;"},
+				{"\t}"},
+				{"}"},
+				{""},
+			}
 
 			return name
 		end
@@ -338,22 +394,24 @@ local function compileRegex(targetName, regex)
 
 	local root = compileTree(tree)
 
-	table.insert(bodyFunctions, table.concat(helpers, "\n"))
-	table.insert(bodyFunctions, signature .. " {")
-	table.insert(bodyFunctions, string.format("\treturn %s(blob, offset);", root))
-	table.insert(bodyFunctions, "}")
-	table.insert(bodyFunctions, "")
+	local signature = string.format("static int32_t regex_%s(Blob const* blob, int32_t offset)", targetName)
+	cSourceHigh:emit {
+		{"%s {", signature},
+		{"\treturn %s(blob, offset);", root},
+		{"}"},
+		{""},
+	}
 end
 
 local function compileAST(name)
 	-- Forward declare type.
-	emit(headerTypes, {
+	hSourceHigh:emit {
 		{"typedef struct {"},
 		{"\t%sParse* parse;", PREFIX},
 		{"\tint32_t index;"},
 		{"} %s;", name},
 		{""},
-	})
+	}
 
 	-- A parser returns the number of tokens it consumed (-1 for failure; 0 or more means success).
 	-- The index to construct the AST is the Parse_ptr immediately after parsing, ie, the index
@@ -369,47 +427,61 @@ local function compileChoice(choice)
 	assert(#choice.fields ~= 0)
 
 	local parseSignature = compileAST(choice.name)
-	table.insert(bodyTypes, string.format("%s;", parseSignature))
-	table.insert(bodyTypes, "")
+	cSourceHigh:emit {
+		{"%s;", parseSignature},
+		{""},
+	}
 
 	-- Generate internal parser.
-	emit(bodyFunctions, {
+	cSourceLow:emit {
 		{"%s {", parseSignature},
 		{"\tint32_t consumed;"},
-	})
+	}
 	for i, field in ipairs(choice.fields) do
 		if field.cut then
 			fail("Cuts like " .. field.location .. " aren't allowed on choices.")
 		end
 
-		emit(bodyFunctions, {
+		cSourceLow:emit {
 			{"\tconsumed = %s_parse(parse, from, error);", field.typeName},
 			{"\tif (consumed >= 0) {"},
 			{"\t\t%sParse_push(parse, %d);", PREFIX, i},
 			{"\t\treturn consumed;"},
 			{"\t}"},
-		})
+		}
 	end
-	emit(bodyFunctions, {
+	cSourceLow:emit {
 		{"\treturn -1;"},
 		{"}"},
 		{""},
-	})
+	}
+
 	-- Generate getters.
 	for i, field in ipairs(choice.fields) do
-		emit(headerFunctions, {
-			{"inline int %s_is_%s(%s ast) {", choice.name, field.name, choice.name},
+		hSourceLow:emit {
+			{"int %s_is_%s(%s ast);", choice.name, field.name, choice.name},
+			{""},
+		}
+		cSourceLow:emit {
+			{"int %s_is_%s(%s ast) {", choice.name, field.name, choice.name},
+			{"\tassert(ast.index != -1);"},
 			{"\treturn ast.parse->data[ast.index - 1] == %d;", i},
 			{"}"},
 			{""},
-		})
+		}
 
-		emit(headerFunctions, {
-			{"inline %s %s_%s(%s ast) {", field.typeName, choice.name, field.name, choice.name},
+		hSourceLow:emit {
+			{"%s %s_%s(%s ast);", field.typeName, choice.name, field.name, choice.name},
+			{""},
+		}
+		cSourceLow:emit {
+			{"%s %s_%s(%s ast) {", field.typeName, choice.name, field.name, choice.name},
+			{"\tassert(ast.index != -1);"},
+			{"\tassert(ast.parse->data[ast.index - 1] == %d);", i},
 			{"\treturn (%s){.parse=ast.parse, .index=ast.index - 1};", field.typeName},
 			{"}"},
 			{""},
-		})
+		}
 	end
 end
 
@@ -419,16 +491,18 @@ local function compileSequence(sequence)
 	assert(#sequence.fields ~= 0)
 
 	local parseSignature = compileAST(sequence.name)
-	table.insert(bodyTypes, string.format("%s;", parseSignature))
-	table.insert(bodyTypes, "")
+	cSourceHigh:emit {
+		{"%s;", parseSignature},
+		{""},
+	}
 
 	-- Generate internal parser.
-	emit(bodyFunctions, {
-		{"\%s {", parseSignature},
+	cSourceLow:emit {
+		{"%s {", parseSignature},
 		{"\tint32_t origin = %sParse_ptr(parse);", PREFIX},
 		{"\tint32_t consumed = 0;"},
 		{""},
-	})
+	}
 
 	-- Parse the fields.
 	for i, field in ipairs(sequence.fields) do
@@ -437,7 +511,7 @@ local function compileSequence(sequence)
 			-- a contiguous array.
 			-- [# # #][a:-1][# # #][b:&a][# # #][c:&b][&c][&b][arrayi:&a]
 			local maxCond = field.modifier.mark == "?" and string.format("count%d < 1", i) or "1"
-			emit(bodyFunctions, {
+			cSourceLow:emit {
 				{"\tint32_t count%d = 0;", i},
 				{"\tint32_t linked%d = -1;", i},
 				{"\twhile (%s) {", maxCond},
@@ -449,54 +523,54 @@ local function compileSequence(sequence)
 				{"\t\tcount%d++;", i},
 				{"\t\tconsumed += c;"},
 				{"\t}"},
-			})
+			}
 			if field.modifier.mark == "+" then
-				emit(bodyFunctions, {
+				cSourceLow:emit {
 					{"\tif (count%d == 0) {", i},
-				})
+				}
 				if field.cut then
-					emit(bodyFunctions, {
+					cSourceLow:emit {
 						{"\t\tError_text(error, \"%s\");", field.cut},
 						{"\t\tError_at_location(error, head_location(parse, from + consumed));"},
-					})
+					}
 				end
-				emit(bodyFunctions, {
+				cSourceLow:emit {
 					{"\t\tgoto fail;"},
 					{"\t}"},
-				})
+				}
 			elseif field.cut then
 				fail("The modifier `" .. field.modifier.mark .. "` cannot fail at " .. field.location .. ".")
 			end
 
-			emit(bodyFunctions, {
+			cSourceLow:emit {
 				{"\tfor (int32_t k = 0; k < count%d; k++) {", i},
 				{"\t\t%sParse_push(parse, linked%d);", PREFIX, i},
 				{"\t\tlinked%d = parse->data[linked%d];", i, i},
 				{"\t}"},
 				{"\tint32_t array%d = %sParse_ptr(parse) - 1;", i, PREFIX},
 				{""},
-			})
+			}
 		else
-			emit(bodyFunctions, {
+			cSourceLow:emit {
 				{"\tint32_t consumed%d = %s_parse(parse, from + consumed, error);", i, field.typeName, i},
-			})
-			emit(bodyFunctions, {
+			}
+			cSourceLow:emit {
 				{"\tif (consumed%d < 0) {", i},
-			})
+			}
 			if field.cut then
-				emit(bodyFunctions, {
+				cSourceLow:emit {
 					{"\t\tError_text(error, \"%s\");", field.cut},
 					{"\t\tError_at_location(error, head_location(parse, from + consumed));"},
-				})
+				}
 			end
 
-			emit(bodyFunctions, {
+			cSourceLow:emit {
 				{"\t\tgoto fail;"},
 				{"\t}"},
 				{"\tint32_t result%d = %sParse_ptr(parse);", i, PREFIX},
 				{"\tconsumed += consumed%d;", i},
 				{""},
-			})
+			}
 		end
 	end
 
@@ -505,27 +579,27 @@ local function compileSequence(sequence)
 	for i, field in ipairs(sequence.fields) do
 		if field.modifier then
 			-- Follow the linked list
-			emit(bodyFunctions, {
+			cSourceLow:emit {
 				{"\t%sParse_push(parse, count%d);", PREFIX, i},
 				{"\t%sParse_push(parse, array%d);", PREFIX, i},
-			})
+			}
 			treeSize = treeSize + 2
 		else
-			emit(bodyFunctions, {
+			cSourceLow:emit {
 				{"\t%sParse_push(parse, result%d);", PREFIX, i},
-			})
+			}
 			treeSize = treeSize + 1
 		end
 	end
 
-	emit(bodyFunctions, {
+	cSourceLow:emit {
 		{"\treturn consumed;"},
 		{"fail:"},
 		{"\t%sParse_reset(parse, origin);", PREFIX},
 		{"\treturn -1;"},
 		{"}"},
 		{""},
-	})
+	}
 
 	-- Generate getters.
 	local parseOffset = 0
@@ -534,7 +608,7 @@ local function compileSequence(sequence)
 
 		if field.modifier and field.modifier.mark:match "[+*?]" then
 			if field.name ~= "_" then
-				emit(headerFunctions, {
+				hSourceLow:emit {
 					{"inline int32_t %s_%s_count(%s ast) {", sequence.name, field.name, sequence.name},
 					{"\tif (ast.index < 0) {"},
 					{"\t\treturn 0;"},
@@ -542,8 +616,8 @@ local function compileSequence(sequence)
 					{"\treturn ast.parse->data[ast.index - %d + %d];", treeSize, parseOffset},
 					{"}"},
 					{""},
-				})
-				emit(headerFunctions, {
+				}
+				hSourceLow:emit {
 					{"inline %s %s_%s(%s ast, int32_t i) {", field.typeName, sequence.name, field.name, sequence.name},
 					{"\tassert(0 <= ast.index);"},
 					{"\tint32_t size = ast.parse->data[ast.index - %d + %d];", treeSize, parseOffset},
@@ -552,20 +626,20 @@ local function compileSequence(sequence)
 					{"\treturn (%s){.parse=ast.parse, .index=ast.parse->data[array + size - i]};", field.typeName},
 					{"}"},
 					{""},
-				})
+				}
 			end
 			
 			-- One for the length and one for the array pointer.
 			parseOffset = parseOffset + 2
 		elseif not field.modifier then
 			if field.name ~= "_" then
-				emit(headerFunctions, {
+				hSourceLow:emit {
 					{"inline %s %s_%s(%s ast) {", field.typeName, sequence.name, field.name, sequence.name},
 					{"\tassert(0 <= ast.index);"},
 					{"\treturn (%s){.parse=ast.parse, .index=ast.parse->data[ast.index - %d + %d]};", field.typeName, treeSize, parseOffset},
 					{"}"},
 					{""},
-				})
+				}
 			end
 
 			parseOffset = parseOffset + 1
@@ -745,17 +819,13 @@ for name, def in pairs(astDefinitions) do
 		else
 			-- Token or AST.
 			if not body:match "^[a-zA-Z][_a-zA-Z0-9]*$" then
-				io.stderr:write("Bad element syntax `" .. body .. "` at " .. field.location .. ".\n")
-				io.stderr:flush()
-				os.exit(1)
+				fail("Bad element syntax `" .. body .. "` at " .. field.location .. ".")
 			end
 
 			if body:sub(1, 1):upper() == body:sub(1, 1) then
 				-- AST.
 				if not astDefinitions[body] then
-					io.stderr:write("No AST called `" .. body .. "` has been defined, but it's used at " .. field.location .. ".\n")
-					io.stderr:flush()
-					os.exit(1)
+					fail("No AST called `" .. body .. "` has been defined, but it's used at " .. field.location .. ".")
 				end
 
 				table.insert(fields, {
@@ -768,9 +838,7 @@ for name, def in pairs(astDefinitions) do
 			else
 				-- Token.
 				if not regexDefinitions[body] then
-					io.stderr:write("No token called `" .. body .. "` has been defined, but it's used at " .. field.location .. ".\n")
-					io.stderr:flush()
-					os.exit(1)
+					fail("No token called `" .. body .. "` has been defined, but it's used at " .. field.location .. ".")
 				end
 
 				local enum = "T_" .. body:upper()
@@ -809,15 +877,15 @@ end
 -- Emit "AST" types for individual tokens.
 for _, token in ipairs(tokenTags) do
 	local treeName = string.format("%s_%s", PREFIX, token.enum)
-	emit(headerTypes, {
+	hSourceHigh:emit {
 		{"typedef struct {"},
 		{"\t%sParse* parse;", PREFIX},
 		{"\tint32_t index;"},
 		{"} %s;", treeName},
 		{""},
-	})
+	}
 
-	emit(bodyTypes, {
+	cSourceHigh:emit {
 		{"static inline int32_t %s_parse(%sParse* parse, int32_t from, Error* error) {", treeName, PREFIX},
 		{"\t(void)error;"},
 		{"\tif (from < parse->token_count && parse->token_tags[from] == %s) {", token.enum},
@@ -826,31 +894,23 @@ for _, token in ipairs(tokenTags) do
 		{"\treturn -1;"},
 		{"}"},
 		{""},
-	})
+	}
 end
 
 -- Publish any public parsers.
-emit(bodyFunctions, {
+cSourceLow:emit {
 	{"static %sParse* %sParse_new(Blob const* blob, Error* error);", PREFIX, PREFIX},
 	{""},
-})
+}
 for name, def in pairs(astDefinitions) do
 	if def.public then
 		local signature = string.format("%s %s_from_blob(Blob const* blob, Error* error)", def.typeName, def.typeName)
-		emit(headerFunctions, {
+		hSourceLow:emit {
 			{"%s;", signature},
 			{""},
-		})
+		}
 
-		--[[
-	ASTParse* parse = ASTParse_new(blob, &tokenError);
-	if (parse == NULL) {
-		Error_render_colorful(&tokenError, stderr);
-		exit(1);
-	}
-		]]
-
-		emit(bodyFunctions, {
+		cSourceLow:emit {
 			{"%s {", signature},
 			{"\t%sParse* parse = %sParse_new(blob, error);", PREFIX, PREFIX},
 			{"\tif (parse == NULL) {"},
@@ -871,7 +931,7 @@ for name, def in pairs(astDefinitions) do
 			{"\treturn (%s){.parse=parse, .index=parse->size};", def.typeName},
 			{"}"},
 			{""},
-		})
+		}
 	end
 end
 
@@ -879,42 +939,54 @@ end
 
 -- Write out the files.
 local guard = "_" .. outHFileName:upper():gsub("[^A-Za-z0-9]", "_")
-outHFile:write("// THIS FILE WAS GENERATED BY peg.lua.\n")
-outHFile:write("#ifndef " .. guard .. "\n")
-outHFile:write("#define " .. guard .. "\n")
-outHFile:write([==[
-#include "../parser.h"
+hSourceTop:emit {
+	{"// THIS FILE WAS GENERATED BY peg.lua."},
+	{"#ifndef %s", guard},
+	{"#define %s", guard},
+	{"#include \"../parser.h\""},
+	{""},
+	{"typedef struct {"},
+	{"\tBlob const* blob;"},
+	{""},
+	{"\t//Token data."},
+	{"\tint32_t token_count;"},
+	{"\tint32_t* token_tags;"},
+	{"\tint32_t* token_offsets;"},
+	{"\tint32_t* token_lengths;"},
+	{""},
+	{"\t//AST data."},
+	{"\tint32_t* data;"},
+	{"\tint32_t size;"},
+	{"\tint32_t capacity;"},
+	{"} %sParse;", PREFIX},
+	{""},
+}
 
-typedef struct {
-	Blob const* blob;
+cSourceTop:emit {
+	{"// THIS FILE WAS GENERATED BY peg.lua"},
+	{"#include \"%s.h\"", outname},
+	{"#include \"assert.h\""},
+	{"#include \"stdint.h\""},
+	{"#include \"stdlib.h\""},
+	{"#include \"string.h\""},
+	{""},
+}
 
-	// Token data.
-	int32_t token_count;
-	int32_t* token_tags;
-	int32_t* token_offsets;
-	int32_t* token_lengths;
-
-	// AST data.
-	int32_t* data;
-	int32_t size;
-	int32_t capacity;
-} ]==] .. PREFIX .. [==[Parse;
-
-]==])
-
-
-outCFile:write("// THIS FILE WAS GENERATED BY peg.lua.\n")
-outCFile:write(string.format("#include \"%s.h\"\n\n", outname))
-outCFile:write("#include \"assert.h\"\n")
-outCFile:write("#include \"stdint.h\"\n")
-outCFile:write("#include \"stdlib.h\"\n")
-outCFile:write("#include \"string.h\"\n\n")
-outCFile:write("typedef enum {\n\tTAG_INVALID,\n")
+cSourceTop:emit {
+	{"typedef enum {"},
+	{"\tTAG_INVALID,"},
+}
 for _, tag in ipairs(tokenTags) do
-	outCFile:write("\t" .. tag.enum .. ",\n")
+	cSourceTop:emit {
+		{"\t%s,", tag.enum},
+	}
 end
-outCFile:write("} TokenTag;\n\n")
-outCFile:write((([==[
+cSourceTop:emit {
+	{"} TokenTag;"},
+	{""},
+}
+
+cSourceTop:emit {{(([==[
 
 static inline Location head_location($Parse* parse, int32_t offset) {
 	int32_t t = offset < parse->token_count ? offset : parse->token_count - 1;
@@ -943,33 +1015,9 @@ static int32_t $Parse_push($Parse* parse, int32_t value) {
 	return parse->size - 1;
 }
 
-]==]):gsub("%$", PREFIX)))
+]==]):gsub("%$", PREFIX))}}
 
-outCFile:write("\n")
-
-for _, line in ipairs(headerTypes) do
-	outHFile:write(line)
-	outHFile:write("\n")
-end
-
-for _, line in ipairs(headerFunctions) do
-	outHFile:write(line)
-	outHFile:write("\n")
-end
-
-for _, line in ipairs(bodyTypes) do
-	outCFile:write(line)
-	outCFile:write("\n")
-end
-
-outCFile:write(string.rep("/", 80) .. "\n\n")
-
-for _, line in ipairs(bodyFunctions) do
-	outCFile:write(line)
-	outCFile:write("\n")
-end
-
-outCFile:write((([==[
+cSourceLow:emit {{(([==[
 static $Parse* $Parse_new(Blob const* blob, Error* error) {
 	$Parse* parse = malloc(sizeof($Parse));
 	if (parse == NULL) {
@@ -1021,29 +1069,36 @@ static $Parse* $Parse_new(Blob const* blob, Error* error) {
 			int keep;
 			TokenTag tag;
 			int32_t component;
-]==]):gsub("%$", PREFIX)))
+]==]):gsub("%$", PREFIX))}}
 
 for _, tag in ipairs(tokenTags) do
 	if not tag.keyword then
-		outCFile:write(string.format("\t\t\tcomponent = %s(blob, offset);\n", tag.matcher))
-		outCFile:write("\t\t\tif (length < component) {\n")
-		outCFile:write(string.format("\t\t\t\tkeep = %d;\n", tag.keep and 1 or 0))
-		outCFile:write("\t\t\t\tlength = component;\n")
-		outCFile:write(string.format("\t\t\t\ttag = %s;\n", tag.enum))
-		outCFile:write("\t\t\t}\n")
+		cSourceLow:emit {
+			{"\t\t\tcomponent = %s(blob, offset);", tag.matcher},
+			{"\t\t\tif (length < component) {"},
+			{"\t\t\t\tkeep = %d;", tag.keep and 1 or 0},
+			{"\t\t\t\tlength = component;"},
+			{"\t\t\t\ttag = %s;", tag.enum},
+			{"\t\t\t}"},
+		}
 	end
 end
 
-outCFile:write("\n\t\t\t// Switch generic tags to specific keywords.\n")
+cSourceLow:emit {
+	{""},
+	{"\t\t\t// Switch generic tags to specific keywords."},
+}
 for _, tag in ipairs(tokenTags) do
 	if tag.keyword then
-		outCFile:write(string.format("\t\t\tif (length == %d && memcmp(blob->data + offset, %s, %d) == 0) {\n", #tag.literal - 2, tag.literal, #tag.literal - 2))
-		outCFile:write(string.format("\t\t\t\ttag = %s;\n", tag.enum))
-		outCFile:write("\t\t\t}\n")
+		cSourceLow:emit {
+			{"\t\t\tif (length == %d && memcmp(blob->data + offset, %s, %d) == 0) {", #tag.literal - 2, tag.literal, #tag.literal - 2},
+			{"\t\t\t\ttag = %s;", tag.enum},
+			{"\t\t\t}"},
+		}
 	end
 end
 
-outCFile:write [==[
+cSourceLow:emit {{[==[
 
 			if (length == 0) {
 				// Report a bad token error.
@@ -1069,9 +1124,14 @@ outCFile:write [==[
 	}
 	return parse;
 }
-]==]
+]==]}}
 
 -- Flush and close them.
-outHFile:write("#endif\n")
-outHFile:close()
-outCFile:close()
+hSourceLow:emit {
+	{"#endif"},
+}
+
+--------------------------------------------------------------------------------
+
+cSource:dump(outCFile)
+hSource:dump(outHFile)
