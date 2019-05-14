@@ -609,7 +609,11 @@ local function compileSequence(sequence)
 		if field.modifier and field.modifier.mark:match "[+*?]" then
 			if field.name ~= "_" then
 				hSourceLow:emit {
-					{"inline int32_t %s_%s_count(%s ast) {", sequence.name, field.name, sequence.name},
+					{"int32_t %s_%s_count(%s ast);", sequence.name, field.name, sequence.name},
+					{""},
+				}
+				cSourceLow:emit {
+					{"int32_t %s_%s_count(%s ast) {", sequence.name, field.name, sequence.name},
 					{"\tif (ast.index < 0) {"},
 					{"\t\treturn 0;"},
 					{"\t}"},
@@ -617,8 +621,14 @@ local function compileSequence(sequence)
 					{"}"},
 					{""},
 				}
+
 				hSourceLow:emit {
-					{"inline %s %s_%s(%s ast, int32_t i) {", field.typeName, sequence.name, field.name, sequence.name},
+					{"%s %s_%s(%s ast, int32_t i);", field.typeName, sequence.name, field.name, sequence.name},
+					{""},
+				}
+
+				cSourceLow:emit {
+					{"%s %s_%s(%s ast, int32_t i) {", field.typeName, sequence.name, field.name, sequence.name},
 					{"\tassert(0 <= ast.index);"},
 					{"\tint32_t size = ast.parse->data[ast.index - %d + %d];", treeSize, parseOffset},
 					{"\tassert(0 <= i && i < size);"},
@@ -634,7 +644,11 @@ local function compileSequence(sequence)
 		elseif not field.modifier then
 			if field.name ~= "_" then
 				hSourceLow:emit {
-					{"inline %s %s_%s(%s ast) {", field.typeName, sequence.name, field.name, sequence.name},
+					{"%s %s_%s(%s ast);", field.typeName, sequence.name, field.name, sequence.name},
+					{""},
+				}
+				cSourceLow:emit {
+					{"%s %s_%s(%s ast) {", field.typeName, sequence.name, field.name, sequence.name},
 					{"\tassert(0 <= ast.index);"},
 					{"\treturn (%s){.parse=ast.parse, .index=ast.parse->data[ast.index - %d + %d]};", field.typeName, treeSize, parseOffset},
 					{"}"},
