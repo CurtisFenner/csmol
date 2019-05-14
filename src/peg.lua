@@ -530,8 +530,10 @@ local function compileSequence(sequence)
 				}
 				if field.cut then
 					cSourceLow:emit {
-						{"\t\tError_text(error, \"%s\");", field.cut},
-						{"\t\tError_at_location(error, head_location(parse, from + consumed));"},
+						{"\t\tif (!Error_has_problem(error)) {"},
+						{"\t\t\tError_text(error, \"%s\");", field.cut},
+						{"\t\t\tError_at_location(error, head_location(parse, from + consumed));"},
+						{"\t\t}"},
 					}
 				end
 				cSourceLow:emit {
@@ -559,8 +561,10 @@ local function compileSequence(sequence)
 			}
 			if field.cut then
 				cSourceLow:emit {
-					{"\t\tError_text(error, \"%s\");", field.cut},
-					{"\t\tError_at_location(error, head_location(parse, from + consumed));"},
+					{"\t\tif (!Error_has_problem(error)) {"},
+					{"\t\t\tError_text(error, \"%s\");", field.cut},
+					{"\t\t\tError_at_location(error, head_location(parse, from + consumed));"},
+					{"\t\t}"},
 				}
 			end
 
@@ -820,7 +824,9 @@ for name, def in pairs(astDefinitions) do
 
 		if body:sub(1, 1) == "\"" then
 			-- Keyword token.
-			assert(body:match "^\"[^\"]+\"$")
+			if not body:match "^\"[^\"]+\"$" then
+				fail("Bad syntax at " .. field.location .. ".")
+			end
 
 			table.insert(fields, {
 				name = field.name,
