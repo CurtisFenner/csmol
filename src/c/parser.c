@@ -183,9 +183,9 @@ static void Location_print_excerpt(Location const* location, FILE* file) {
 	int needsCarets = 0;
 	int caretLow = -1;
 	int caretHigh = -1;
-	for (int32_t i = 0; i < location->blob->size; i++) {
+	for (int32_t i = 0; i <= location->blob->size; i++) {
 		int drawing = lineBegin - 1 <= line && line <= lineEnd + 1;
-		if (returned) {
+		if (returned || i == location->blob->size) {
 			if (needsCarets) {
 				fprintf(file, "%*s | ", LINE_NUM_WIDTH, "");
 				fprintf(file, "%*s", caretLow, "");
@@ -203,6 +203,10 @@ static void Location_print_excerpt(Location const* location, FILE* file) {
 			needsCarets = 0;
 			caretLow = -1;
 			caretHigh = -1;
+		}
+
+		if (i == location->blob->size) {
+			break;
 		}
 
 		char c = location->blob->data[i];
