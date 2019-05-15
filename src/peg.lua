@@ -28,7 +28,7 @@ function Source:emit(lines)
 
 	for _, line in ipairs(lines) do
 		local success, result = pcall(string.format, table.unpack(line))
-		assert(success, line[1])
+		assert(success, result .. ":\n" .. line[1])
 		table.insert(self._elements, result)
 	end
 end
@@ -511,12 +511,38 @@ local function compileSequence(sequence)
 			-- a contiguous array.
 			-- [# # #][a:-1][# # #][b:&a][# # #][c:&b][&c][&b][arrayi:&a]
 			local maxCond = field.modifier.mark == "?" and string.format("count%d < 1", i) or "1"
+			assert(field.modifier.separator ~= nil)
+
 			cSourceLow:emit {
 				{"\tint32_t count%d = 0;", i},
 				{"\tint32_t linked%d = -1;", i},
 				{"\twhile (%s) {", maxCond},
+			}
+			if field.modifier.separator then
+				-- Parse a separator before the real element, if at least one
+				-- element has already been parsed.
+				cSourceLow:emit {
+					{"\t\tint32_t separator = 0;"},
+					{"\t\tif (count%d != 0) {", i},
+					{"\t\t\tseparator = %s_parse(parse, from + consumed, error);", field.modifier.separator},
+					{"\t\t\tif (separator < 0) {"},
+					{"\t\t\t\tbreak;"},
+					{"\t\t\t}"},
+					{"\t\t\tconsumed += separator;"},
+					{"\t\t}"},
+				}
+			end
+			cSourceLow:emit {
 				{"\t\tint32_t c = %s_parse(parse, from + consumed, error);", field.typeName},
 				{"\t\tif (c < 1) {"},
+			}
+			if field.modifier.separator then
+				-- "Undo" parsing the separator.
+				cSourceLow:emit {
+					{"\t\t\tconsumed -= separator;"},
+				}
+			end
+			cSourceLow:emit {
 				{"\t\t\tbreak;"},
 				{"\t\t}"},
 				{"\t\tlinked%d = %sParse_push(parse, linked%d);", i, PREFIX, i},
@@ -808,7 +834,7 @@ for name, def in pairs(astDefinitions) do
 
 				modifier = {
 					mark = def:sub(-1),
-					separator = getKeywordParser(def:sub(sepBegin, -3)),
+					separator = PREFIX .. "_" .. getKeywordParser(def:sub(sepBegin, -3)),
 				}
 				body = def:sub(1, sepBegin - 1)
 			else

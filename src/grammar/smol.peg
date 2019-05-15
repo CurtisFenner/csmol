@@ -6,7 +6,7 @@
 	-comment := /\/\/[^\n]*/
 	string_literal := /"(\\[tn\\"]|[^"\\])*"/
 	int_literal := /[0-9][0-9]*/
-	operator := /[+*\/<>=%^\-]+/
+	operator := /[+*\/<>=%^\-][+*\/<>=%^\-]*/
 	punctuation := /[.,:;!?|()\[\]{}]/
 
 # ASTs
@@ -64,8 +64,8 @@
 		_: "}" ! "Expected another class member or a `}` to close a union's body"
 
 	Implements :=
-		_: "implements"
-		constraints: Type","~+
+		_: "is"
+		constraints: Type","~+ ! "Expected a type constraint after `is`"
 
 	Field :=
 		_: "var"
@@ -88,7 +88,7 @@
 		_: "["
 		_: typeparam_iden","~+ ! "Expected a type variable after `[`"
 		constraints: GenericConstraints?
-		_: "]" ! "Expected a `]` to finish the type-variables definition"
+		_: "]" ! "Expected a `]` to finish a type-variables definition"
 
 	GenericConstraints :=
 		_: "|"
@@ -187,7 +187,7 @@
 	DoSt :=
 		_: "do"
 		expression: Expression ! "Expected an expression after `do`"
-		_: ";" ! "Expected an `=` to finish a do-statement"
+		_: ";" ! "Expected a `;` to finish a do-statement"
 
 	IfSt :=
 		_: "if"
@@ -240,14 +240,17 @@
 		|forall_expr: ForallExpr
 
 	ChainExpr :=
-		base: ExpressionBase
-		accesses: ExprAccess*
+		base: ExprAtom
 		op: ExprOp?
 		isa: IsaOp?
 
+	ExprAtom :=
+		base: ExpressionBase
+		accesses: ExprAccess*
+
 	ExprOp :=
 		operator: operator
-		rhs: ExpressionBase ! "Expected an expression after an operator"
+		rhs: ExprAtom ! "Expected an expression after an operator"
 
 	IsaOp :=
 		_: "isa"
@@ -283,7 +286,6 @@
 
 	ExpressionBase :=
 		|parenthesized: ParenthesizedExpression
-		|variable: iden
 		|this_literal: "this"
 		|true_literal: "true"
 		|false_literal: "false"
@@ -292,6 +294,7 @@
 		|return_literal: "return"
 		|static_expr: StaticCallExpr
 		|new_expr: NewExpr
+		|variable: iden
 
 	ParenthesizedExpression :=
 		_: "("
