@@ -1,27 +1,45 @@
 #include "stdio.h"
 #include "stdlib.h"
+#include "string.h"
 
 #include "gen/grammar.h"
 #include "parser.h"
 
-int main(int argc, char** argv) {
-	if (argc < 2) {
-		fprintf(stderr, "USAGE:\n\t%s <sourcefile>\n", argv[0]);
-		fflush(stderr);
-		exit(1);
+static void print_global_usage(char const* program) {
+	fprintf(stderr,
+	        "USAGE:\n"
+	        "\t%s parse <input .smol> <output .smol.ast>\n",
+	        program);
+	fflush(stderr);
+}
+
+static void print_parse_usage(char const* program) {
+	fprintf(stderr,
+	        "USAGE:\n"
+	        "\t%s parse <input .smol> <output .smol.ast>\n",
+	        program);
+	fflush(stderr);
+}
+
+static int main_parse(int argc, char** argv) {
+	if (argc < 4) {
+		print_parse_usage(argc == 0 ? "smolc" : argv[0]);
+		return EXIT_FAILURE;
 	}
 
-	FILE* file = fopen(argv[1], "rb");
+	char const* filename = argv[2];
+	FILE* file = fopen(filename, "rb");
 	if (file == NULL) {
-		fprintf(stderr, "Could not open file `%s`\n", argv[1]);
+		fprintf(stderr, "Could not open file `%s`\n", filename);
 		fflush(stderr);
 		exit(1);
 	}
 
-	Blob* blob = Blob_from_file(file, argv[1]);
+	Blob* blob = Blob_from_file(file, filename);
 	if (blob == NULL) {
-		fprintf(stderr, "Could not allocate memory for file `%s`.\n", argv[1]);
+		fprintf(stderr, "Could not allocate memory for file `%s`.\n", filename);
 		fflush(stderr);
+		fclose(file);
 		exit(1);
 	}
 
@@ -30,6 +48,7 @@ int main(int argc, char** argv) {
 	if (Error_has_problem(&parseError)) {
 		Error_render_colorful(&parseError, stderr);
 		fflush(stderr);
+		fclose(file);
 		exit(1);
 	}
 
@@ -37,7 +56,35 @@ int main(int argc, char** argv) {
 	printf("Index: %d\n", (int)source.index);
 	(void)source;
 
-	Blob_destroy(blob);
+	char const* astfile = argv[3];
+	FILE* out = fopen(astfile, "wb");
+	if (out == NULL) {
+		fprintf(stderr, "Could not open file `%s`\n", astfile);
+		fclose(file);
+	}
 
-	return 0;
+	for (int32_t i = 0; i < source.parse->size; i++) {
+		size_t w = fwrite(&source.parse->data[i], sizeof(int32_t), 1, out);
+		assert(w == 1);
+	}
+	fflush(out);
+	fclose(out);
+
+	Blob_destroy(blob);
+	return EXIT_SUCCESS;
+}
+
+int main(int argc, char** argv) {
+	if (argc < 2) {
+		print_global_usage(argc == 0 ? "smolc" : argv[0]);
+		return EXIT_FAILURE;
+	}
+
+	char const* command = argv[1];
+	if (strcmp(command, "parse") == 0) {
+		return main_parse(argc, argv);
+	}
+
+	print_global_usage(argc == 0 ? "smolc" : argv[0]);
+	return EXIT_FAILURE;
 }
