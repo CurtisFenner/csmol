@@ -63,8 +63,8 @@ static int main_parse(int argc, char** argv) {
 		fclose(file);
 	}
 
-	for (int32_t i = 0; i < source.parse->size; i++) {
-		size_t w = fwrite(&source.parse->data[i], sizeof(int32_t), 1, out);
+	for (int32_t i = 0; i < source.parse->ast_size; i++) {
+		size_t w = fwrite(&source.parse->ast_data[i], sizeof(int32_t), 1, out);
 		assert(w == 1);
 	}
 	fflush(out);

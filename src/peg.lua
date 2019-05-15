@@ -465,7 +465,7 @@ local function compileChoice(choice)
 		cSourceLow:emit {
 			{"int %s_is_%s(%s ast) {", choice.name, field.name, choice.name},
 			{"\tassert(ast.index != -1);"},
-			{"\treturn ast.parse->data[ast.index - 1] == %d;", i},
+			{"\treturn ast.parse->ast_data[ast.index - 1] == %d;", i},
 			{"}"},
 			{""},
 		}
@@ -477,7 +477,7 @@ local function compileChoice(choice)
 		cSourceLow:emit {
 			{"%s %s_%s(%s ast) {", field.typeName, choice.name, field.name, choice.name},
 			{"\tassert(ast.index != -1);"},
-			{"\tassert(ast.parse->data[ast.index - 1] == %d);", i},
+			{"\tassert(ast.parse->ast_data[ast.index - 1] == %d);", i},
 			{"\treturn (%s){.parse=ast.parse, .index=ast.index - 1};", field.typeName},
 			{"}"},
 			{""},
@@ -573,7 +573,7 @@ local function compileSequence(sequence)
 			cSourceLow:emit {
 				{"\tfor (int32_t k = 0; k < count%d; k++) {", i},
 				{"\t\t%sParse_push(parse, linked%d);", PREFIX, i},
-				{"\t\tlinked%d = parse->data[linked%d];", i, i},
+				{"\t\tlinked%d = parse->ast_data[linked%d];", i, i},
 				{"\t}"},
 				{"\tint32_t array%d = %sParse_ptr(parse) - 1;", i, PREFIX},
 				{""},
@@ -647,7 +647,7 @@ local function compileSequence(sequence)
 					{"\tif (ast.index < 0) {"},
 					{"\t\treturn 0;"},
 					{"\t}"},
-					{"\treturn ast.parse->data[ast.index - %d + %d];", treeSize, parseOffset},
+					{"\treturn ast.parse->ast_data[ast.index - %d + %d];", treeSize, parseOffset},
 					{"}"},
 					{""},
 				}
@@ -660,10 +660,10 @@ local function compileSequence(sequence)
 				cSourceLow:emit {
 					{"%s %s_%s(%s ast, int32_t i) {", field.typeName, sequence.name, field.name, sequence.name},
 					{"\tassert(0 <= ast.index);"},
-					{"\tint32_t size = ast.parse->data[ast.index - %d + %d];", treeSize, parseOffset},
+					{"\tint32_t size = ast.parse->ast_data[ast.index - %d + %d];", treeSize, parseOffset},
 					{"\tassert(0 <= i && i < size);"},
-					{"\tint32_t array = ast.parse->data[ast.index - %d + %d];", treeSize, parseOffset + 1},
-					{"\treturn (%s){.parse=ast.parse, .index=ast.parse->data[array + size - i]};", field.typeName},
+					{"\tint32_t array = ast.parse->ast_data[ast.index - %d + %d];", treeSize, parseOffset + 1},
+					{"\treturn (%s){.parse=ast.parse, .index=ast.parse->ast_data[array + size - i]};", field.typeName},
 					{"}"},
 					{""},
 				}
@@ -680,7 +680,7 @@ local function compileSequence(sequence)
 				cSourceLow:emit {
 					{"%s %s_%s(%s ast) {", field.typeName, sequence.name, field.name, sequence.name},
 					{"\tassert(0 <= ast.index);"},
-					{"\treturn (%s){.parse=ast.parse, .index=ast.parse->data[ast.index - %d + %d]};", field.typeName, treeSize, parseOffset},
+					{"\treturn (%s){.parse=ast.parse, .index=ast.parse->ast_data[ast.index - %d + %d]};", field.typeName, treeSize, parseOffset},
 					{"}"},
 					{""},
 				}
@@ -974,7 +974,7 @@ for name, def in pairs(astDefinitions) do
 			{"\t\tError_at_location(error, (Location){blob, parse->token_offsets[consumed], parse->token_offsets[consumed] + parse->token_lengths[consumed]});"},
 			{"\t\treturn (%s){NULL, -1};", def.typeName},
 			{"\t}"},
-			{"\treturn (%s){.parse=parse, .index=parse->size};", def.typeName},
+			{"\treturn (%s){.parse=parse, .index=parse->ast_size};", def.typeName},
 			{"}"},
 			{""},
 		}
@@ -1001,9 +1001,9 @@ hSourceTop:emit {
 	{"\tint32_t* token_lengths;"},
 	{""},
 	{"\t//AST data."},
-	{"\tint32_t* data;"},
-	{"\tint32_t size;"},
-	{"\tint32_t capacity;"},
+	{"\tint32_t* ast_data;"},
+	{"\tint32_t ast_size;"},
+	{"\tint32_t ast_capacity;"},
 	{"} %sParse;", PREFIX},
 	{""},
 }
@@ -1040,25 +1040,25 @@ static inline Location head_location($Parse* parse, int32_t offset) {
 }
 
 static int32_t $Parse_ptr($Parse* parse) {
-	return parse -> size;
+	return parse->ast_size;
 }
 
 static void $Parse_reset($Parse* parse, int32_t to) {
-	parse->size = to;
+	parse->ast_size = to;
 }
 
 static int32_t $Parse_push($Parse* parse, int32_t value) {
-	if (parse->size == parse->capacity) {
+	if (parse->ast_size == parse->ast_capacity) {
 		// Reallocate.
-		int32_t* newdata = (int32_t*)malloc(4 * parse->capacity * sizeof(int32_t));
-		memcpy(newdata, parse->data, sizeof(int32_t) * parse->capacity);
-		free(parse->data);
-		parse->data = newdata;
+		int32_t* newdata = (int32_t*)malloc(4 * parse->ast_capacity * sizeof(int32_t));
+		memcpy(newdata, parse->ast_data, sizeof(int32_t) * parse->ast_capacity);
+		free(parse->ast_data);
+		parse->ast_data = newdata;
 	}
 
-	parse->data[parse->size] = value;
-	parse->size++;
-	return parse->size - 1;
+	parse->ast_data[parse->ast_size] = value;
+	parse->ast_size++;
+	return parse->ast_size - 1;
 }
 
 ]==]):gsub("%$", PREFIX))}}
@@ -1071,9 +1071,9 @@ static $Parse* $Parse_new(Blob const* blob, Error* error) {
 		return NULL;
 	}
 	parse->blob = blob;
-	parse->size = 0;
-	parse->capacity = 1024;
-	parse->data = (int32_t*)malloc(sizeof(int32_t) * parse->capacity);
+	parse->ast_size = 0;
+	parse->ast_capacity = 1024;
+	parse->ast_data = (int32_t*)malloc(sizeof(int32_t) * parse->ast_capacity);
 
 	// Tokenize
 	int32_t offset = 0;
