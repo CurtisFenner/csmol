@@ -500,6 +500,7 @@ local function compileSequence(sequence)
 	cSourceLow:emit {
 		{"%s {", parseSignature},
 		{"\tint32_t origin = %sParse_ptr(parse);", PREFIX},
+		{"\tint32_t stack_start = parse->parsing_stack_index;"},
 		{"\tint32_t consumed = 0;"},
 		{""},
 	}
@@ -507,15 +508,14 @@ local function compileSequence(sequence)
 	-- Parse the fields.
 	for i, field in ipairs(sequence.fields) do
 		if field.modifier then
-			-- Parse into a linked list, then follow the links back to make
-			-- a contiguous array.
-			-- [# # #][a:-1][# # #][b:&a][# # #][c:&b][&c][&b][arrayi:&a]
+			-- Record the indexes of elements onto a stack, then reads them back
+			-- after parsing.
 			local maxCond = field.modifier.mark == "?" and string.format("count%d < 1", i) or "1"
 			assert(field.modifier.separator ~= nil)
 
 			cSourceLow:emit {
 				{"\tint32_t count%d = 0;", i},
-				{"\tint32_t linked%d = -1;", i},
+				{"\tint32_t tmp_array%d = parse->parsing_stack_index;", i},
 				{"\twhile (%s) {", maxCond},
 			}
 			if field.modifier.separator then
@@ -545,7 +545,9 @@ local function compileSequence(sequence)
 			cSourceLow:emit {
 				{"\t\t\tbreak;"},
 				{"\t\t}"},
-				{"\t\tlinked%d = %sParse_push(parse, linked%d);", i, PREFIX, i},
+				{"\t\tassert(parse->parsing_stack_index < parse->parsing_stack_capacity);"},
+				{"\t\tparse->parsing_stack[parse->parsing_stack_index] = %sParse_ptr(parse);", PREFIX},
+				{"\t\tparse->parsing_stack_index++;"},
 				{"\t\tcount%d++;", i},
 				{"\t\tconsumed += c;"},
 				{"\t}"},
@@ -569,15 +571,6 @@ local function compileSequence(sequence)
 			elseif field.cut then
 				fail("The modifier `" .. field.modifier.mark .. "` cannot fail at " .. field.location .. ".")
 			end
-
-			cSourceLow:emit {
-				{"\tfor (int32_t k = 0; k < count%d; k++) {", i},
-				{"\t\t%sParse_push(parse, linked%d);", PREFIX, i},
-				{"\t\tlinked%d = parse->ast_data[linked%d];", i, i},
-				{"\t}"},
-				{"\tint32_t array%d = %sParse_ptr(parse) - 1;", i, PREFIX},
-				{""},
-			}
 		else
 			cSourceLow:emit {
 				{"\tint32_t consumed%d = %s_parse(parse, from + consumed, error);", i, field.typeName, i},
@@ -604,11 +597,22 @@ local function compileSequence(sequence)
 		end
 	end
 
+	-- Collect the arrays.
+	for i, field in ipairs(sequence.fields) do
+		if field.modifier then
+			cSourceLow:emit {
+				{"\tint32_t array%d = %sParse_ptr(parse);", i, PREFIX},
+				{"\tfor (int32_t i = 0; i < count%d; i++) {", i},
+				{"\t\t%sParse_push(parse, parse->parsing_stack[tmp_array%d + i]);", PREFIX, i},
+				{"\t}"},
+			}
+		end
+	end
+
 	-- Emit the field pointers.
 	local treeSize = 0
 	for i, field in ipairs(sequence.fields) do
 		if field.modifier then
-			-- Follow the linked list
 			cSourceLow:emit {
 				{"\t%sParse_push(parse, count%d);", PREFIX, i},
 				{"\t%sParse_push(parse, array%d);", PREFIX, i},
@@ -623,9 +627,11 @@ local function compileSequence(sequence)
 	end
 
 	cSourceLow:emit {
+		{"\tparse->parsing_stack_index = stack_start;"},
 		{"\treturn consumed;"},
 		{"fail:"},
 		{"\t%sParse_reset(parse, origin);", PREFIX},
+		{"\tparse->parsing_stack_index = stack_start;"},
 		{"\treturn -1;"},
 		{"}"},
 		{""},
@@ -659,16 +665,16 @@ local function compileSequence(sequence)
 
 				cSourceLow:emit {
 					{"%s %s_%s(%s ast, int32_t i) {", field.typeName, sequence.name, field.name, sequence.name},
-					{"\tassert(0 <= ast.index);"},
+					{"\tassert(0 < ast.index && ast.index <= ast.parse->ast_size);"},
 					{"\tint32_t size = ast.parse->ast_data[ast.index - %d + %d];", treeSize, parseOffset},
 					{"\tassert(0 <= i && i < size);"},
 					{"\tint32_t array = ast.parse->ast_data[ast.index - %d + %d];", treeSize, parseOffset + 1},
-					{"\treturn (%s){.parse=ast.parse, .index=ast.parse->ast_data[array + size - i]};", field.typeName},
+					{"\treturn (%s){.parse=ast.parse, .index=ast.parse->ast_data[array + i]};", field.typeName},
 					{"}"},
 					{""},
 				}
 			end
-			
+
 			-- One for the length and one for the array pointer.
 			parseOffset = parseOffset + 2
 		elseif not field.modifier then
@@ -679,7 +685,7 @@ local function compileSequence(sequence)
 				}
 				cSourceLow:emit {
 					{"%s %s_%s(%s ast) {", field.typeName, sequence.name, field.name, sequence.name},
-					{"\tassert(0 <= ast.index);"},
+					{"\tassert(0 < ast.index && ast.index <= ast.parse->ast_size);"},
 					{"\treturn (%s){.parse=ast.parse, .index=ast.parse->ast_data[ast.index - %d + %d]};", field.typeName, treeSize, parseOffset},
 					{"}"},
 					{""},
@@ -929,15 +935,26 @@ for _, token in ipairs(tokenTags) do
 		{"\tint32_t index;"},
 		{"} %s;", treeName},
 		{""},
+		{"%sLexeme %s_lexeme(%s token);", PREFIX, treeName, treeName},
+		{""},
 	}
 
 	cSourceHigh:emit {
 		{"static inline int32_t %s_parse(%sParse* parse, int32_t from, Error* error) {", treeName, PREFIX},
 		{"\t(void)error;"},
 		{"\tif (from < parse->token_count && parse->token_tags[from] == %s) {", token.enum},
+		{"\t\t%sParse_push(parse, from);", PREFIX},
 		{"\t\treturn 1;"},
 		{"\t}"},
 		{"\treturn -1;"},
+		{"}"},
+		{""},
+		{"%sLexeme %s_lexeme(%s token) {", PREFIX, treeName, treeName},
+		{"\tassert(0 < token.index && token.index <= token.parse->ast_size);"},
+		{"\tint32_t i = token.parse->ast_data[token.index - 1];"},
+		{"\tint32_t offset = token.parse->token_offsets[i];"},
+		{"\tint32_t length =  token.parse->token_lengths[i];"},
+		{"\treturn (%sLexeme){token.parse->blob->data + offset, length};", PREFIX},
 		{"}"},
 		{""},
 	}
@@ -962,6 +979,14 @@ for name, def in pairs(astDefinitions) do
 			{"\tif (parse == NULL) {"},
 			{"\t\treturn (%s){NULL, -3};", def.typeName},
 			{"\t}"},
+			{"\tparse->parsing_stack = (int32_t*)malloc(sizeof(int32_t) * blob->size);"},
+			{"\tif (parse->parsing_stack == NULL) {"},
+			{"\tError_text(error, \"Memory allocation failed while parsing.\");"},
+			{"\t\tfree(parse);"},
+			{"\t\treturn (%s){.parse=NULL, .index=-1};", def.typeName},
+			{"\t}"},
+			{"\tparse->parsing_stack_capacity = 1024 + 2 * blob->size;"},
+			{"\tparse->parsing_stack_index = 0;"},
 			{"\tint32_t consumed = %s_parse(parse, 0, error);", def.typeName},
 			{"\tif (Error_has_problem(error)) {"},
 			{"\t\treturn (%s){NULL, -2};", def.typeName},
@@ -974,6 +999,10 @@ for name, def in pairs(astDefinitions) do
 			{"\t\tError_at_location(error, (Location){blob, parse->token_offsets[consumed], parse->token_offsets[consumed] + parse->token_lengths[consumed]});"},
 			{"\t\treturn (%s){NULL, -1};", def.typeName},
 			{"\t}"},
+			{"\tfree(parse->parsing_stack);"},
+			{"\tparse->parsing_stack = NULL;"},
+			{"\tparse->parsing_stack_index = -1;"},
+			{"\tparse->parsing_stack_capacity = -1;"},
 			{"\treturn (%s){.parse=parse, .index=parse->ast_size};", def.typeName},
 			{"}"},
 			{""},
@@ -994,18 +1023,27 @@ hSourceTop:emit {
 	{"typedef struct {"},
 	{"\tBlob const* blob;"},
 	{""},
-	{"\t//Token data."},
+	{"\t// Token data."},
 	{"\tint32_t token_count;"},
 	{"\tint32_t* token_tags;"},
 	{"\tint32_t* token_offsets;"},
 	{"\tint32_t* token_lengths;"},
 	{""},
-	{"\t//AST data."},
+	{"\t// AST data."},
 	{"\tint32_t* ast_data;"},
 	{"\tint32_t ast_size;"},
 	{"\tint32_t ast_capacity;"},
+	{""},
+	{"\t// Parsing data."},
+	{"\tint32_t* parsing_stack;"},
+	{"\tint32_t parsing_stack_capacity;"},
+	{"\tint32_t parsing_stack_index;"},
 	{"} %sParse;", PREFIX},
 	{""},
+	{"typedef struct {"},
+	{"\tchar const* str;"},
+	{"\tint32_t length;"},
+	{"} %sLexeme;", PREFIX},
 }
 
 cSourceTop:emit {
