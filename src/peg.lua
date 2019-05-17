@@ -1177,9 +1177,11 @@ static $Parse* $Parse_new(Blob const* blob, Error* error) {
 				break;
 			}
 
-			int32_t length = 0;
-			int keep;
-			TokenTag tag;
+			struct {
+				int keep;
+				int32_t length;
+				TokenTag tag;
+			} token = {0, -1, -1};
 			int32_t component;
 ]==]):gsub("%$", PREFIX))
 	}
@@ -1189,10 +1191,10 @@ for _, tag in ipairs(tokenTags) do
 	if not tag.keyword then
 		cSourceLow:emit {
 			{"\t\t\tcomponent = %s(blob, offset);", tag.matcher},
-			{"\t\t\tif (length < component) {"},
-			{"\t\t\t\tkeep = %d;", tag.keep and 1 or 0},
-			{"\t\t\t\tlength = component;"},
-			{"\t\t\t\ttag = %s;", tag.enum},
+			{"\t\t\tif (token.length < component) {"},
+			{"\t\t\t\ttoken.keep = %d;", tag.keep and 1 or 0},
+			{"\t\t\t\ttoken.length = component;"},
+			{"\t\t\t\ttoken.tag = %s;", tag.enum},
 			{"\t\t\t}"},
 		}
 	end
@@ -1206,12 +1208,12 @@ for _, tag in ipairs(tokenTags) do
 	if tag.keyword then
 		cSourceLow:emit {
 			{
-				"\t\t\tif (length == %d && memcmp(blob->data + offset, %s, %d) == 0) {",
+				"\t\t\tif (token.length == %d && memcmp(blob->data + offset, %s, %d) == 0) {",
 				#tag.literal - 2,
 				tag.literal,
 				#tag.literal - 2
 			},
-			{"\t\t\t\ttag = %s;", tag.enum},
+			{"\t\t\t\ttoken.tag = %s;", tag.enum},
 			{"\t\t\t}"},
 		}
 	end
@@ -1221,7 +1223,7 @@ cSourceLow:emit {
 	{
 		[==[
 
-			if (length == 0) {
+			if (token.length <= 0) {
 				// Report a bad token error.
 				Error_text(error, "There is no valid token to parse");
 				int32_t end = offset + 1;
@@ -1232,15 +1234,15 @@ cSourceLow:emit {
 				return NULL;
 			}
 
-			if (keep) {
+			if (token.keep) {
 				// Don't record whitespace, comments, etc in the token stream.
-				tags[parse->token_count] = tag;
-				lengths[parse->token_count] = length;
+				tags[parse->token_count] = token.tag;
+				lengths[parse->token_count] = token.length;
 				offsets[parse->token_count] = offset;
 				parse->token_count++;
 			}
 
-			offset += length;
+			offset += token.length;
 		}
 	}
 	return parse;
