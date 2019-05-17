@@ -499,13 +499,16 @@ local function compileSequence(sequence)
 	-- Generate internal parser.
 	cSourceLow:emit {
 		{"%s {", parseSignature},
-		{"\tint32_t origin = %sParse_ptr(parse);", PREFIX},
+	}
+	local origin = cSourceLow:section()
+	cSourceLow:emit {
 		{"\tint32_t stack_start = parse->parsing_stack_index;"},
 		{"\tint32_t consumed = 0;"},
 		{""},
 	}
 
 	-- Parse the fields.
+	local canFail = false
 	for i, field in ipairs(sequence.fields) do
 		if field.modifier then
 			-- Record the indexes of elements onto a stack, then reads them back
@@ -564,6 +567,8 @@ local function compileSequence(sequence)
 						{"\t\t}"},
 					}
 				end
+
+				canFail = true
 				cSourceLow:emit {
 					{"\t\tgoto fail;"},
 					{"\t}"},
@@ -587,6 +592,7 @@ local function compileSequence(sequence)
 				}
 			end
 
+			canFail = true
 			cSourceLow:emit {
 				{"\t\tgoto fail;"},
 				{"\t}"},
@@ -629,10 +635,22 @@ local function compileSequence(sequence)
 	cSourceLow:emit {
 		{"\tparse->parsing_stack_index = stack_start;"},
 		{"\treturn consumed;"},
-		{"fail:"},
-		{"\t%sParse_reset(parse, origin);", PREFIX},
-		{"\tparse->parsing_stack_index = stack_start;"},
-		{"\treturn -1;"},
+	}
+
+	if canFail then
+		origin:emit {
+			{"\tint32_t origin = %sParse_ptr(parse);", PREFIX},
+		}
+
+		cSourceLow:emit {
+			{"fail:"},
+			{"\t%sParse_reset(parse, origin);", PREFIX},
+			{"\tparse->parsing_stack_index = stack_start;"},
+			{"\treturn -1;"},
+		}
+	end
+
+	cSourceLow:emit {
 		{"}"},
 		{""},
 	}
