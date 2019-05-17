@@ -197,7 +197,7 @@ local function parseRegex(regex)
 						class = {
 							lone = true,
 							inverted = false,
-							byte
+							[1] = byte,
 						},
 					})
 				end
@@ -327,7 +327,7 @@ local function compileRegex(targetName, regex)
 				{"}"},
 				{""},
 			}
-			
+
 			return name
 		elseif tree.class then
 			assert(type(tree.class.inverted) == "boolean")
@@ -704,7 +704,8 @@ local function compileSequence(sequence)
 				cSourceLow:emit {
 					{"%s %s_%s(%s ast) {", field.typeName, sequence.name, field.name, sequence.name},
 					{"\tassert(0 < ast.index && ast.index <= ast.parse->ast_size);"},
-					{"\treturn (%s){.parse=ast.parse, .index=ast.parse->ast_data[ast.index - %d + %d]};", field.typeName, treeSize, parseOffset},
+					{"\tint32_t index = ast.parse->ast_data[ast.index - %d + %d];", treeSize, parseOffset},
+					{"\treturn (%s){.parse=ast.parse, .index=index};", field.typeName},
 					{"}"},
 					{""},
 				}
@@ -807,7 +808,7 @@ end
 local function getKeywordParser(str)
 	assert(type(str) == "string")
 	assert(str:sub(1, 1) == "\"" and 3 <= #str)
-	
+
 	local cname = str:sub(2, -2):gsub("[^a-zA-Z0-9]+", function(x)
 		return "d" .. x:byte() .. "b_"
 	end)
@@ -1014,7 +1015,10 @@ for name, def in pairs(astDefinitions) do
 			{"\t\t\tconsumed = 0;"},
 			{"\t\t}"},
 			{"\t\tError_text(error, \"There is unexpected content\");"},
-			{"\t\tError_at_location(error, (Location){blob, parse->token_offsets[consumed], parse->token_offsets[consumed] + parse->token_lengths[consumed]});"},
+			{"\t\tint32_t token_location = parse->token_offsets[consumed];"},
+			{"\t\tint32_t token_length = parse->token_lengths[consumed];"},
+			{"\t\tLocation location = (Location){blob, token_location, token_location + token_length};"},
+			{"\t\tError_at_location(error, location);"},
 			{"\t\treturn (%s){NULL, -1};", def.typeName},
 			{"\t}"},
 			{"\tfree(parse->parsing_stack);"},
@@ -1088,7 +1092,9 @@ cSourceTop:emit {
 	{""},
 }
 
-cSourceTop:emit {{(([==[
+cSourceTop:emit {
+	{
+		(([==[
 
 static inline Location head_location($Parse* parse, int32_t offset) {
 	int32_t t = offset < parse->token_count ? offset : parse->token_count - 1;
@@ -1117,9 +1123,13 @@ static int32_t $Parse_push($Parse* parse, int32_t value) {
 	return parse->ast_size - 1;
 }
 
-]==]):gsub("%$", PREFIX))}}
+]==]):gsub("%$", PREFIX))
+	}
+}
 
-cSourceLow:emit {{(([==[
+cSourceLow:emit {
+	{
+		(([==[
 static $Parse* $Parse_new(Blob const* blob, Error* error) {
 	$Parse* parse = malloc(sizeof($Parse));
 	if (parse == NULL) {
@@ -1171,7 +1181,9 @@ static $Parse* $Parse_new(Blob const* blob, Error* error) {
 			int keep;
 			TokenTag tag;
 			int32_t component;
-]==]):gsub("%$", PREFIX))}}
+]==]):gsub("%$", PREFIX))
+	}
+}
 
 for _, tag in ipairs(tokenTags) do
 	if not tag.keyword then
@@ -1193,14 +1205,21 @@ cSourceLow:emit {
 for _, tag in ipairs(tokenTags) do
 	if tag.keyword then
 		cSourceLow:emit {
-			{"\t\t\tif (length == %d && memcmp(blob->data + offset, %s, %d) == 0) {", #tag.literal - 2, tag.literal, #tag.literal - 2},
+			{
+				"\t\t\tif (length == %d && memcmp(blob->data + offset, %s, %d) == 0) {",
+				#tag.literal - 2,
+				tag.literal,
+				#tag.literal - 2
+			},
 			{"\t\t\t\ttag = %s;", tag.enum},
 			{"\t\t\t}"},
 		}
 	end
 end
 
-cSourceLow:emit {{[==[
+cSourceLow:emit {
+	{
+		[==[
 
 			if (length == 0) {
 				// Report a bad token error.
@@ -1226,7 +1245,9 @@ cSourceLow:emit {{[==[
 	}
 	return parse;
 }
-]==]}}
+]==]
+	}
+}
 
 -- Flush and close them.
 hSourceLow:emit {
